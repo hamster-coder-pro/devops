@@ -1,0 +1,147 @@
+﻿name: "Version parse"
+description: "Parse version string into semantic components"
+
+inputs:
+  value:
+    required: true
+    description: "Version string (Expected format: major[.minor][.patch][-build][+metadata])"
+  step-title:
+    required: false
+    description: "Step title in step summary"
+    default: "Parse version string"
+  fail-on-error:
+    required: false
+    description: "Fail action in case of invalid version string."
+    default: "false"
+  silent:
+    required: false
+    description: "Do now create step summary"
+    default: "false"
+
+outputs:
+  is-valid:
+    value: ${{ steps.parse.outputs.is-valid }} 
+    description: "Whether the version string is valid"
+  major:
+    value: ${{ steps.parse.outputs.major }} 
+    description: "'Major' part of version string."
+  minor:
+    value: ${{ steps.parse.outputs.minor }} 
+    description: "'Minor' part of version string."
+  patch:
+    value: ${{ steps.parse.outputs.patch }} 
+    description: "'Patch' part of version string."
+  build:
+    value: ${{ steps.parse.outputs.build }} 
+    description: "'Build' part of version string."
+  metadata:
+    value: ${{ steps.parse.outputs.metadata }} 
+    description: "'Metadata' part of version string."
+  normalized:
+    value: ${{ steps.parse.outputs.normalized }}
+    description: "Normalized version (major.minor.patch)"
+  full:
+    value: ${{ steps.parse.outputs.full }}
+    description: "Normalized version (major.minor.patch[-build][+metadata])"
+    
+runs:
+  using: "composite"  
+
+  steps:
+    - name: Parse and normalize base version
+      id: parse
+      shell: bash
+      run: |
+        INPUT_VERSION="${{ inputs.value }}"        
+        FAILED="false"
+        FAIL_ON_ERROR="${{ inputs.fail-on-error || 'false' }}"
+        STEP_TITLE="${{ inputs.step-title }}"
+        IS_VALID="true"
+
+        {
+          echo "## ${STEP_TITLE}"
+          echo ""
+          echo "**Input:** \`$INPUT_VERSION\`"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+        
+        # Initialize outputs
+        IS_VALID="true"
+        MAJOR=""
+        MINOR=""
+        PATCH=""
+        BUILD=""
+        METADATA=""
+        NORMALIZED=""
+        FULL=""
+
+        # Regex: major[.minor][.patch][-build][+metadata]
+        # 'major' is required. 
+        # 'minor', 'patch', 'build', 'metadata' are optional.
+        if [[ "$INPUT_VERSION" =~ ^([0-9]+)(\.([0-9]+))?(\.([0-9]+))?(-([0-9A-Za-z.-]+))?(\+([0-9A-Za-z.-]+))?$ ]]; then
+          MAJOR="${BASH_REMATCH[1]}"
+          MINOR="${BASH_REMATCH[3]:-0}"
+          PATCH="${BASH_REMATCH[5]:-0}"
+          BUILD="${BASH_REMATCH[7]}"
+          METADATA="${BASH_REMATCH[9]}"
+
+          NORMALIZED="${MAJOR}.${MINOR}.${PATCH}"
+
+          FULL="$NORMALIZED"
+          if [[ -n "$BUILD" ]]; then
+            FULL="${FULL}-${BUILD}"
+          fi
+          if [[ -n "$METADATA" ]]; then
+            FULL="${FULL}+${METADATA}"
+          fi
+
+          if [[ "${{ inputs.silent || 'false' }}" == "true" ]]; then
+            {
+              echo "## ${STEP_TITLE}"
+              echo ""
+              echo "| Component | Value |"
+              echo "|-----------|-------|"
+              echo "| Major | \`$MAJOR\` |"
+              echo "| Minor | \`$MINOR\` |"
+              echo "| Patch | \`$PATCH\` |"
+              echo "| Build | \`${BUILD:-none}\` |"
+              echo "| Metadata | \`${METADATA:-none}\` |"
+              echo "| Normalized | \`$NORMALIZED\` |"
+              echo "| Full | \`$FULL\` |"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+        else
+          IS_VALID="false"
+
+          {
+            echo "## ${STEP_TITLE}"
+            echo ""
+            echo ":x: Invalid version format \`$INPUT_VERSION\`"
+            echo ""
+            echo "**Expected:** \`major[.minor][.patch][-build][+metadata]\`"
+            echo ""
+            echo "**Examples:**"
+            echo "- \`1\` → \`1.0.0\`"
+            echo "- \`1.2\` → \`1.2.0\`"
+            echo "- \`1.2.3\` → \`1.2.3\`"
+            echo "- \`1.2.3-abc123d\` → \`1.2.3\` (build: \`abc123d\`)"
+            echo "- \`1.2.3+meta\` → \`1.2.3\` (metadata: \`meta\`)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # Populate outputs
+        echo "is-valid=$IS_VALID" >> "$GITHUB_OUTPUT"
+        echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+        echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+        echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
+        echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+        echo "metadata=$METADATA" >> "$GITHUB_OUTPUT"          
+        echo "normalized=$NORMALIZED" >> "$GITHUB_OUTPUT"
+        echo "full=$FULL" >> "$GITHUB_OUTPUT"
+
+        if [[ "$IS_VALID" == "false" && "$FAIL_ON_ERROR" == "true" ]]; then
+          exit 1
+        fi

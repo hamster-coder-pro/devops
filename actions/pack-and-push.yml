@@ -1,0 +1,83 @@
+name: "Pack and Push"
+description: "Create NuGet package and push it to repository"
+
+inputs:
+  version:
+    required: true
+    description: "Package version"
+
+  configuration:
+    required: false
+    description: "Build Configuration (Default: Release)"
+    default: "Release"
+
+  src:
+    required: false
+    description: "Path to solution / project file which should be packed (Default: './src')"
+    default: "./src"
+
+  dest:
+    required: false
+    description: "Packages files destination folder (Default: './dest/packages')"
+    default: "./dest/packages"
+
+  nuget_repository:
+    required: false
+    description: "NuGet repository path"
+
+  nuget_api_key:
+    required: false
+    description: "NuGet repository API key (password)"
+
+  push:
+    required: false
+    description: "Whether package should be pushed to NuGet repository (Default: true)"
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+
+      - name: Package version validate
+        id: version-validate
+        uses: ./.github/actions/version-parse
+        with:
+          value: ${{ inputs.version }}
+          step-title: ":hash: Validate NuGet package version"
+          fail-on-error: true
+          silent: false
+      
+      - name: Pack
+        shell: bash  
+        run: |   
+          SRC="${{ inputs.src }}"
+          DEST="${{ inputs.dest }}"
+          CONFIGURATION="${{ inputs.configuration }}"
+          VERSION="${{ steps.version-validate.outputs.full }}"
+          PACKAGE_VERSION="$VERSION"
+          INFO_VERSION="$VERSION"
+
+          if [[ -z "${{ steps.version-validate.outputs.metadata }}" ]]; then
+            INFO_VERSION="${INFO_VERSION}+${{ github.sha }}"
+          fi
+          
+          dotnet pack "$SRC" \
+            --configuration "$CONFIGURATION" \
+            --no-build \
+            --output "$DEST" \
+            -p:Version="$VERSION" \
+            -p:PackageVersion="$PACKAGE_VERSION" \
+            -p:InformationalVersion="$INFO_VERSION"
+
+      - name: Publish to GitHub Packages
+        if: ${{ inputs.push == 'true' }}
+        shell: bash
+        run: |
+          DEST="${{ inputs.dest }}"
+          NUGET_REPOSITORY="${{ inputs.nuget_repository }}"
+          NUGET_API_KEY="${{ inputs.nuget_api_key }}"
+
+          dotnet nuget push "${DEST}/*.nupkg" \
+            --source "$NUGET_REPOSITORY" \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate

@@ -1,0 +1,238 @@
+﻿name: "Gather Conventional Commits"
+description: "Gather conventional commits from SHA to SHA"
+
+inputs:
+  first-sha:
+    required: true
+    description: "SHA of the first commit"
+  last-sha:
+    required: false
+    description: "SHA of the last commit"
+    default: "HEAD"
+  major-types:
+    required: false
+    description: "List of major version bump commit types ('|' delimited)"
+    default: ""
+  minor-types:
+    required: true
+    description: "List of minor version bump commit types ('|' delimited). Default: 'feat'."
+    default: "feat"
+  patch-types:
+    required: true
+    description: "List of patch version bump commit types ('|' delimited). Default: 'fix|perf|revert|refactor'."
+    default: "fix|perf|revert|refactor"
+  other-types:
+    required: true
+    description: "List of no impact version bump commit types ('|' delimited). Default: 'chore|docs|style|test|ci|build'."
+    default: "chore|docs|style|test|ci|build"
+  sort:
+    required: false
+    description: "Sort commits by type"
+    default: "true"
+  print:
+    required: false
+    description: "Sort commits list"
+    default: "true"
+  read-subject:
+    required: false
+    description: "Include commit subject (first line)"
+    default: "true"
+  read-body:
+    required: false
+    description: "Include commit body"
+    default: "true"    
+
+outputs:
+  commits:
+    value: ${{ steps.result.outputs.commits }}
+    description: "'Major' part of version string."
+  version-bump:
+    value: ${{ steps.result.outputs.version-bump }}
+    description: "Recommended version bump for commits in result set."
+    
+runs:
+  using: "composite"  
+
+  steps:
+    - name: Gather Conventional Commits
+      id: gather-commits
+      shell: bash
+      run: |
+        FIRST_SHA="${{ inputs.first-sha }}"
+        LAST_SHA="${{ inputs.last-sha || 'HEAD' }}"
+
+        READ_SUBJECT="${{ inputs.read-subject }}"
+        READ_BODY="${{ inputs.read-body }}"
+
+        # Build format string based on inputs
+        FORMAT=""
+        if [[ "$READ_SUBJECT" == "true" ]]; then
+          FORMAT="%s"
+        fi
+        if [[ "$READ_BODY" == "true" ]]; then
+          if [[ -n "$FORMAT" ]]; then
+            FORMAT="$FORMAT%n%b"
+          else
+            FORMAT="%b"
+          fi
+        fi
+
+        # Get commit messages since last tag
+        if [[ -n "$FIRST_SHA" ]]; then
+          # Get both subject and body
+          COMMITS="$(git log "$FIRST_SHA".."$LAST_SHA" --pretty=format:"$FORMAT")"
+        else
+          COMMITS="$(git log "$LAST_SHA" --pretty=format:"$FORMAT")"
+        fi
+        # filter only conventional commits 
+        COMMITS=$(echo "$COMMITS" | grep -E '^[a-z]+(\([^)]+\))?!?:' || true)
+        # populate output variables
+        {
+          echo 'commits<<EOF'
+          echo "$COMMITS"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Sort Commits
+      id: sort-commits
+      shell: bash
+      run: |
+        COMMITS="${{ steps.gather-commits.outputs.commits }}"
+        MAJOR_TYPES="${{ inputs.major-types }}" # 
+        MINOR_TYPES="${{ inputs.minor-types }}" # feat
+        PATCH_TYPES="${{ inputs.patch-types }}" # fix|perf|revert|refactor
+        OTHER_TYPES="${{ inputs.other-types }}" # chore|docs|style|test|ci|build
+
+        get_priority() {
+          local line="$1"
+          if [[ -n "$MAJOR_TYPES" && "$line" =~ ^($MAJOR_TYPES)(\([^\)]+\))?\!?: ]]; then echo "0"; # Major          
+          elif [[ -n "$MINOR_TYPES" && "$line" =~ ^($MINOR_TYPES)(\([^\)]+\))?!: ]]; then echo "0"; # Major
+          elif [[ -n "$PATCH_TYPES" && "$line" =~ ^($PATCH_TYPES)(\([^\)]+\))?!: ]]; then echo "0"; # Major
+          elif [[ -n "$OTHER_TYPES" && "$line" =~ ^($OTHER_TYPES)(\([^\)]+\))?!: ]]; then echo "0"; # Major
+          elif [[ -n "$MINOR_TYPES" && "$line" =~ ^($MINOR_TYPES)(\([^\)]+\))?: ]]; then echo "1"; # Minor
+          elif [[ -n "$PATCH_TYPES" && "$line" =~ ^($PATCH_TYPES)(\([^\)]+\))?: ]]; then echo "2"; # Patch
+          elif [[ -n "$OTHER_TYPES" && "$line" =~ ^($OTHER_TYPES)(\([^\)]+\))?: ]]; then echo "3"; # Other
+          else echo "4"; # Unknown
+          fi
+        }
+        
+        if [[ -z "$COMMITS" ]]; then
+          echo "commits=$COMMITS" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        SORTED_COMMITS=$(
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            echo "$(get_priority "$line") $line"
+          done <<< "$COMMITS" | sort -n | cut -d' ' -f2-
+        )
+        
+        #sort logic
+        # populate output variables        
+        {
+          echo 'commits<<EOF'
+          echo "$SORTED_COMMITS"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
+
+    - name: Print Commits
+      id: print-commits
+      if: ${{ inputs.print == 'true' }}
+      shell: bash
+      run: |
+        COMMITS="${{ steps.sort-commits.outputs.commits }}"
+
+        MAJOR_TYPES="${{ inputs.major-types }}" 
+        MINOR_TYPES="${{ inputs.minor-types }}" # "feat"
+        PATCH_TYPES="${{ inputs.patch-types }}" # "fix|perf|revert|refactor"
+        OTHER_TYPES="${{ inputs.other-types }}" # "chore|docs|style|test|ci|build"
+
+        {
+          echo "## :hash: Conventional commits list"
+          echo ""            
+          # echo "| Type | Commit Message |"
+          # echo "|------|----------------|"
+
+          if [[ -n "$COMMITS" ]]; then            
+            while IFS= read -r LINE; do
+              # Extract type and message
+              #TYPE="${line%%:*}"
+              #MESSAGE="${line#*: }"
+            
+              if [[ -n "$MAJOR_TYPES" && "$LINE" =~ ^($MAJOR_TYPES)(\([^\)]+\))?!?: ]]; then # Major                
+                echo "1. **${LINE}**"
+              elif [[ -n "$MINOR_TYPES" && "$LINE" =~ ^($MINOR_TYPES)(\([^\)]+\))?!: ]]; then # Major
+                echo "1. **${LINE}**"
+              elif [[ -n "$PATCH_TYPES" && "$LINE" =~ ^($PATCH_TYPES)(\([^\)]+\))?!: ]]; then # Major
+                echo "1. **${LINE}**"
+              elif [[ -n "$OTHER_TYPES" && "$LINE" =~ ^($OTHER_TYPES)(\([^\)]+\))?!: ]]; then # Major
+                echo "1. **${LINE}**"
+              elif [[ -n "$MINOR_TYPES" && "$LINE" =~ ^($MINOR_TYPES)(\([^\)]+\))?: ]]; then # Minor
+                echo "1. **${LINE}**"
+              elif [[ -n "$PATCH_TYPES" && "$LINE" =~ ^($PATCH_TYPES)(\([^\)]+\))?: ]]; then # Patch
+                echo "1. **${LINE}**"
+              elif [[ -n "$OTHER_TYPES" && "$LINE" =~ ^($OTHER_TYPES)(\([^\)]+\))?: ]]; then # Other          
+                echo "1. **${LINE}**"
+              else # Unknown
+                echo ":question: **${LINE}**"
+              fi
+            done <<< "$COMMITS"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"    
+    
+    - name: Get version bump
+      id: version-bump      
+      shell: bash
+      run: |
+        COMMITS="${{ steps.sort-commits.outputs.commits }}"
+
+        BUMP=""
+        
+        MAJOR_TYPES="${{ inputs.major-types }}" 
+        MINOR_TYPES="${{ inputs.minor-types }}" # "feat"
+        PATCH_TYPES="${{ inputs.patch-types }}" # "fix|perf|revert|refactor"
+        OTHER_TYPES="${{ inputs.other-types }}" # "chore|docs|style|test|ci|build"
+
+        if [[ -n "$COMMITS" ]]; then      
+          # Take first line only (highest priority commit after sorting)
+          line=$(echo "$COMMITS" | head -n 1)        
+          if [[ -n "$MAJOR_TYPES" && "$line" =~ ^($MAJOR_TYPES)(\([^\)]+\))?!?: ]]; then BUMP="major"; # Major          
+          elif [[ -n "$MINOR_TYPES" && "$line" =~ ^($MINOR_TYPES)(\([^\)]+\))?!: ]]; then BUMP="major"; # Major
+          elif [[ -n "$PATCH_TYPES" && "$line" =~ ^($PATCH_TYPES)(\([^\)]+\))?!: ]]; then BUMP="major"; # Major
+          elif [[ -n "$OTHER_TYPES" && "$line" =~ ^($OTHER_TYPES)(\([^\)]+\))?!: ]]; then BUMP="major"; # Major
+          elif [[ -n "$MINOR_TYPES" && "$line" =~ ^($MINOR_TYPES)(\([^\)]+\))?: ]]; then BUMP="minor"; # Minor
+          elif [[ -n "$PATCH_TYPES" && "$line" =~ ^($PATCH_TYPES)(\([^\)]+\))?: ]]; then BUMP="patch"; # Patch
+          elif [[ -n "$OTHER_TYPES" && "$line" =~ ^($OTHER_TYPES)(\([^\)]+\))?: ]]; then BUMP="none"; # Other          
+          fi
+        fi
+
+        # {
+        #   echo "## :hash: Get version bump based on commits."
+        #   echo ""
+        #   echo ">> Possible values: \`major\`, \`minor\`, \`patch\`, \`none\` and empty string value."
+        #   echo "RESULT = \`$BUMP\`"
+        # } >> "$GITHUB_STEP_SUMMARY"
+
+        # populate output variables
+        echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+    - name: Result
+      id: result
+      shell: bash
+      run: |
+        if [[ "${{ inputs.sort }}" == "true" ]]; then
+          COMMITS="${{ steps.sort-commits.outputs.commits }}"  
+        else
+          COMMITS="${{ steps.gather-commits.outputs.commits }}"
+        fi
+
+        BUMP="${{ steps.version-bump.outputs.bump }}"  
+
+        {
+          echo 'commits<<EOF'
+          echo "$COMMITS"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+        echo "version-bump=$BUMP" >> "$GITHUB_OUTPUT"

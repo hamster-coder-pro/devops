@@ -1,0 +1,237 @@
+﻿name: "SemVer: Get Next Version Tag"
+description: "Compute and validate semantic version using conventional commits."
+
+inputs:
+  version:
+    required: false
+    description: "Provide version (1.2.3-beta.1+build.456) or \"auto\""
+    default: "auto"
+
+outputs:
+  tag:
+    value: ${{ steps.result.outputs.tag }}
+    description: "Computed semantic version tag name"
+  bump-type:
+    value: ${{ steps.result.outputs.bump }}
+    description: "Type of version bump (major/minor/patch/manual)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate manual version input
+      if: inputs.version != 'auto'
+      id: manual-version-normalize
+      uses: ./.github/actions/version-parse
+      with:
+        value: ${{ inputs.version }}
+        step-title: ":hash: Validate manual version input"
+        fail-on-error: true
+
+    - name: Determine base version and last tag
+      id: base
+      shell: bash
+      run: |
+        {
+          echo "## :hash: Determine base version and last tag"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Get latest version tag
+        if [[ -n "$(git tag --list 'v*' --merged HEAD)" ]]; then
+          LAST_TAG="$(git tag --list 'v*' --merged HEAD --sort=-v:refname | head -n1)"
+          VERSION="$(echo "$LAST_TAG" | sed 's/^v//')"
+          LAST_TAG_SHA="$(git rev-list -n 1 "$LAST_TAG")"
+        else
+          {
+            echo "No version tags found. Starting from 0.0.0"            
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          LAST_TAG=""
+          LAST_TAG_SHA=""
+          VERSION="0.0.0"
+        fi
+
+        COMMIT_SHA="${{ github.sha }}"
+        
+        # populate output variables
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+        echo "last_tag_sha=$LAST_TAG_SHA" >> "$GITHUB_OUTPUT"
+        echo "current_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+
+        # print step output
+        {
+          echo "| OUTPUT | VALUE |"
+          echo "|--------|-------|"
+          echo "| Last Tag | $LAST_TAG |"
+          echo "| Last Tag SHA | $LAST_TAG_SHA |"
+          echo "| Base Version | $VERSION |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Skip same commit guard
+      id: commit-guard
+      shell: bash
+      run: |
+        if [[ "${{ steps.base.outputs.last_tag_sha }}" == "${{ steps.base.outputs.current_sha }}" ]]; then
+          {
+            echo "## :hash: Skip same commit guard"
+            echo ""
+            echo ":x: You are not allowed to create two version tags on the same commit."
+          } >> "$GITHUB_STEP_SUMMARY"          
+          exit 1
+        fi        
+
+    - name: Validate base version
+      id: base-version-normalize
+      uses: ./.github/actions/version-parse
+      with:
+        value: ${{ steps.base.outputs.version }}
+        step-title: ":hash: Validate base version"
+
+    - name: Gather Conventional Commits
+      id: gather-commits
+      uses: ./.github/actions/cc-gather
+      with:
+        first-sha: ${{ steps.base.outputs.last_tag_sha }}
+
+    - name: Compute next version
+      id: next-version
+      if: ${{ inputs.version == 'auto' }} 
+      shell: bash
+      run: |
+        BASE_VERSION="${{ steps.base.outputs.version }}"
+        MAJOR="${{ steps.base-version-normalize.outputs.major }}"
+        MINOR="${{ steps.base-version-normalize.outputs.minor }}"
+        PATCH="${{ steps.base-version-normalize.outputs.patch }}"
+        BUMP="${{ steps.gather-commits.outputs.version-bump }}"
+
+        if [[ -z "$BUMP" ]]; then
+          {
+            echo "## :hash: Compute NEXT version"
+            echo ""
+            echo ":x: No conventional commits found since \`$BASE_VERSION\`"
+            echo ""
+            echo "> Commits must follow format: type(scope): description"
+            echo "> Valid types: feat, fix, refactor, perf, revert, chore, docs, style, test, ci, build"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+
+        # Increment version
+        case "$BUMP" in
+          major) 
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            ;;
+          minor) 
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            ;;
+          patch) 
+            PATCH=$((PATCH + 1))
+            ;;
+          none)    
+            {
+              echo "## :hash: Compute NEXT version"
+              echo ""
+              echo ":warning: No version bump required for non-release commits"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"          
+            exit 0
+            ;;
+          *)
+            {
+              echo "## :hash: Compute NEXT version"
+              echo ""
+              echo ":x: Unexpected bump type \`$BUMP\`"
+              echo ""              
+              echo "> Valid types: \`major\`, \`minor\`, \`patch\`, \`none\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+            ;;
+        esac
+        
+        NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+
+        echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+        echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+        echo "patch=$PATCH" >> "$GITHUB_OUTPUT"        
+        echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"        
+    
+    - name: Tag name policy
+      id: tag-policy
+      shell: bash
+      run: |
+        BRANCH="${GITHUB_REF_NAME}"
+
+        if [[ "${{ inputs.version }}" == "auto" ]]; then
+          MAJOR="${{ steps.next-version.outputs.major }}"
+          MINOR="${{ steps.next-version.outputs.minor }}"
+          PATCH="${{ steps.next-version.outputs.patch }}"
+          BUMP="${{ steps.gather-commits.outputs.version-bump }}"
+        else
+          MAJOR="${{ steps.manual-version-normalize.outputs.major }}"
+          MINOR="${{ steps.manual-version-normalize.outputs.minor }}"
+          PATCH="${{ steps.manual-version-normalize.outputs.patch }}"         
+          BUMP="manual"
+        fi
+
+        if [[ "$BRANCH" == "main" ]]; then
+          TAG="v$MAJOR.$MINOR.$PATCH"
+        else
+          BUILD=$(git rev-parse --short=7 HEAD)
+          TAG="v$MAJOR.$MINOR.$PATCH-$BUILD"
+        fi
+
+        {
+          echo "## :hash: Final Tag"
+          echo ""
+          echo "**Version:** `$TAG`"
+        } >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+    - name: Ensure tag does not exist
+      id: tag-exists
+      shell: bash
+      run: |
+        TAG="${{ steps.tag-policy.outputs.tag }}"
+
+        if git rev-parse --verify --quiet "$TAG" >/dev/null 2>&1; then
+          # error: duplicate tag found
+          {
+            echo "## :hash: Ensure tag does not exist"
+            echo ""
+            echo ":x: **Tag already exists**"
+            echo ""
+            echo "**Tag:** `$TAG`"            
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        
+    - name: Compose result
+      id: result
+      shell: bash
+      run: |
+        TAG="${{ steps.tag-policy.outputs.tag }}"
+        SHA="${{ github.sha }}"
+
+        if [[ "${{ inputs.version }}" == "auto" ]]; then
+          BUMP="${{ steps.gather-commits.outputs.version-bump }}"
+        else
+          BUMP="manual"
+        fi  
+
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## :package: SemVer: Get Next Version Tag"
+          echo ""
+          echo "| Property   | Value        |"
+          echo "|------------|--------------|"
+          echo "| Tag        | \`$TAG\`     |"
+          echo "| Bump Type  | \`$BUMP\`    |"
+          echo "| Commit SHA | \`$SHA\`     |"
+        } >> "$GITHUB_STEP_SUMMARY"

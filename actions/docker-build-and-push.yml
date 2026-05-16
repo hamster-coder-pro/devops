@@ -1,0 +1,212 @@
+name: "Docker Build & Push to GHCR"
+description: "Builds and optionally pushes Docker images to GHCR with flexible tagging"
+
+inputs:
+  imageName:
+    description: "Docker image name"
+    required: true
+
+  dockerFilePath:
+    description: "Path to docker file"
+    required: true
+
+  contextPath:
+    description: "Docker build context"
+    default: "."
+    required: true
+
+  platforms:
+    description: "Platforms for multi-arch build"
+    default: "linux/amd64"
+
+  addTagLatest:
+    description: "Should create \"latest\" tag (only for master)"
+    default: "true"
+
+  addTagDate:
+    description: "Should create 'yyyyMMddHHmmss' tag"
+    default: "true"
+
+  addTagCommitSha:
+    description: "Should create brach SHA tag"
+    default: "true"
+
+  tagVersion:
+    description: "Version tag. (if empty - not created)"
+    default: ""
+
+  buildArgs:
+    description: "Optional build args"
+    default: ""
+
+  cacheMode:
+    description: "gha / registry / none"
+    default: "gha"
+
+  registryCacheRef:
+    description: "Registry cache reference (only if cacheMode=registry)"
+    default: ""
+
+  enableAttestations:
+    description: "Enable SBOM/provenance attestations"    
+    default: "true"
+
+  useRepoPath:
+    description: "Push image under repository path. if (false - under owner)"
+    default: "true"
+
+  push:
+    description: "If false — build only, no login, no push"
+    default: "false"
+
+  pushUsername:
+    description: "Username for GHCR login"
+    default: ""
+
+  pushPassword:
+    description: "Password/token for GHCR login"
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+
+    # Timestamp (only if needed)
+    - name: Generate timestamp
+      id: ts
+      if: ${{ inputs.addTagDate == 'true' }}      
+      shell: bash
+      run: echo "value=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+
+    # Branch normalization (only if needed)
+    - name: Normalize branch name
+      id: branch      
+      shell: bash
+      run: |
+        BRANCH="${GITHUB_REF_NAME}"
+        BRANCH="${BRANCH//\//-}"
+        BRANCH=$(echo "$BRANCH" | tr -cd '[:alnum:]._-')
+        BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
+        echo "value=$BRANCH" >> $GITHUB_OUTPUT
+
+    # Owner / Repo normalization (only if push=true)
+    - name: Normalize owner/repo
+      id: repo
+      if: ${{ inputs.push == 'true' }}
+      shell: bash
+      run: |
+        OWNER="${GITHUB_REPOSITORY%/*}"
+        REPO="${GITHUB_REPOSITORY#*/}"
+        OWNER="${OWNER,,}"
+        REPO="${REPO,,}"
+
+        if [[ "${{ inputs.useRepoPath }}" == "true" ]]; then
+          BASE="ghcr.io/$OWNER/$REPO"
+        else
+          BASE="ghcr.io/$OWNER"
+        fi
+
+        echo "base=$BASE" >> $GITHUB_OUTPUT
+
+    # Build tag list (only if push=true)
+    - name: Build tag list
+      id: tags
+      if: ${{ inputs.push == 'true' }}
+      shell: bash
+      run: |
+        TAGS=""
+        BASE="${{ steps.repo.outputs.base }}/${{ inputs.imageName }}"
+
+        if [[ "${{ inputs.addTagLatest }}" == "true" ]]; then
+          if [[ "${{ steps.branch.outputs.value }}" == "master" ]]; then
+            TAGS="$TAGS $BASE:latest"$'\n'
+          fi
+        fi
+
+        if [[ "${{ inputs.addTagDate }}" == "true" ]]; then
+          BR="${{ steps.branch.outputs.value }}"
+
+          if [[ "$BR" == "master" ]]; then            
+            TAGS="$TAGS $BASE:${{ steps.ts.outputs.value }}"$'\n'
+          else            
+            TAGS="$TAGS $BASE:${BR}-${{ steps.ts.outputs.value }}"$'\n'
+          fi
+        fi
+
+        if [[ "${{ inputs.addTagCommitSha }}" == "true" ]]; then
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-12)
+          TAGS="${TAGS}${BASE}:${SHORT_SHA}"$'\n'
+        fi
+
+        if [[ -n "${{ inputs.tagVersion }}" ]]; then
+          TAGS="$TAGS $BASE:${{ inputs.tagVersion }}"$'\n'
+        fi
+
+        # Output as multiline
+        echo "value<<EOF" >> $GITHUB_OUTPUT
+        echo "$TAGS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    # Login to GHCR (only if push=true)
+    - name: Login to GHCR
+      if: ${{ inputs.push == 'true' }}
+      uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ inputs.pushUsername }}
+        password: ${{ inputs.pushPassword }}
+
+    # Build cache configuration
+    - name: Prepare cache config
+      id: cache
+      shell: bash
+      run: |
+        if [[ "${{ inputs.cacheMode }}" == "gha" ]]; then
+          echo "from=type=gha" >> $GITHUB_OUTPUT
+          echo "to=type=gha,mode=max" >> $GITHUB_OUTPUT
+        elif [[ "${{ inputs.cacheMode }}" == "registry" ]]; then
+          REF="${{ inputs.registryCacheRef }}"
+          echo "from=type=registry,ref=$REF" >> $GITHUB_OUTPUT
+          echo "to=type=registry,ref=$REF,mode=max" >> $GITHUB_OUTPUT
+        else
+          echo "from=" >> $GITHUB_OUTPUT
+          echo "to=" >> $GITHUB_OUTPUT
+        fi
+    
+    # Setup Buildx    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    # Build & Push (push=true)
+    - name: Build and Push
+      if: ${{ inputs.push == 'true' }}
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.contextPath }}
+        file: ${{ inputs.dockerFilePath }}
+        platforms: ${{ inputs.platforms }}
+        push: true
+        tags: ${{ steps.tags.outputs.value }}
+        sbom: true
+        provenance: true
+        attests: ${{ inputs.enableAttestations == 'true' && 'type=sbom' || '' }}
+        build-args: ${{ inputs.buildArgs }}
+        cache-from: ${{ steps.cache.outputs.from }}
+        cache-to: ${{ steps.cache.outputs.to }}
+
+    # Build only (push=false)
+    - name: Build only (no push)
+      if: ${{ inputs.push == 'false' }}
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.contextPath }}
+        file: ${{ inputs.dockerFilePath }}
+        platforms: ${{ inputs.platforms }}
+        push: false
+        tags: localbuild
+        sbom: true
+        provenance: true
+        attests: ${{ inputs.enableAttestations == 'true' && 'type=sbom' || '' }}
+        build-args: ${{ inputs.buildArgs }}
+        cache-from: ${{ steps.cache.outputs.from }}
+        cache-to: ${{ steps.cache.outputs.to }}
