@@ -137,8 +137,7 @@ runs:
               echo ""
               echo ":warning: No version bump required for non-release commits"
               echo ""
-            } >> "$GITHUB_STEP_SUMMARY"          
-            exit 0
+            } >> "$GITHUB_STEP_SUMMARY"
             ;;
           *)
             {
