@@ -21,7 +21,7 @@ runs:
     - name: Validate manual version input
       if: inputs.version != 'auto'
       id: manual-version-normalize
-      uses: ./.github/actions/version-parse
+      uses: ./actions/version-parse
       with:
         value: ${{ inputs.version }}
         step-title: ":hash: Validate manual version input"
@@ -83,14 +83,14 @@ runs:
 
     - name: Validate base version
       id: base-version-normalize
-      uses: ./.github/actions/version-parse
+      uses: ./actions/version-parse
       with:
         value: ${{ steps.base.outputs.version }}
         step-title: ":hash: Validate base version"
 
     - name: Gather Conventional Commits
       id: gather-commits
-      uses: ./.github/actions/cc-gather
+      uses: ./actions/conventional-commits
       with:
         first-sha: ${{ steps.base.outputs.last_tag_sha }}
 
