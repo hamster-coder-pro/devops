@@ -89,7 +89,7 @@ runs:
         step-title: ":hash: Validate base version"
 
     - name: Gather Conventional Commits
-      id: gather-commits
+      id: gather-commits                                             
       uses: hamster-coder-pro/devops/actions/conventional-commits@main
       with:
         first-sha: ${{ steps.base.outputs.last_tag_sha }}
